@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en-GB"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b3d91">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+<title>Sue's Flight Hub</title>
+<style>
+:root{--blue:#0b3d91;--green:#0a7a3d;--bg:#f4f6fa}
+*{box-sizing:border-box}
+body{margin:0;font:20px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:#111}
+header{background:var(--blue);color:#fff;padding:18px 16px}
+h1{margin:0;font-size:28px}
+main{padding:14px;max-width:640px;margin:auto}
+.box{background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;box-shadow:0 1px 4px #0002}
+label{display:block;font-weight:700;margin:8px 0 4px}
+input[type=date]{width:100%;font-size:22px;padding:12px;border:2px solid #999;border-radius:10px}
+button{font:inherit;font-weight:700;border:0;border-radius:12px;padding:16px;cursor:pointer;width:100%}
+.go{background:var(--blue);color:#fff;font-size:24px;margin-top:14px}
+.tabs{display:flex;gap:10px}
+.tabs button{background:#fff;border:3px solid var(--blue);color:var(--blue)}
+.tabs{margin-bottom:10px}.tabs button{padding:12px;font-size:20px}.tabs button.on{background:var(--blue);color:#fff}
+h2{margin:6px 0 2px;font-size:25px;color:var(--blue)}
+.sum{margin:0 0 10px;color:#333}
+.card{border:2px solid #d0d6e2;border-radius:12px;padding:10px 12px;margin:8px 0;font-size:16px;line-height:1.35}
+.price{font-size:26px;font-weight:800}
+.price small{font-size:14px;font-weight:600;color:#444}
+.air{font-weight:700;font-size:17px}
+.leg{margin:6px 0;padding:6px 0;border-top:1px solid #e3e7ef}
+.t{font-size:17px;font-weight:700}
+.badge{display:inline-block;border-radius:999px;padding:2px 10px;font-size:14px;font-weight:700;margin:2px 0}
+.yes{background:#d6f3e1;color:var(--green)}.no{background:#eee;color:#555}
+a.book,button.ret{display:block;text-align:center;text-decoration:none;border-radius:12px;padding:11px;font-weight:700;font-size:18px;margin-top:8px}
+a.book{background:var(--green);color:#fff}
+button.ret{background:#e8eefb;color:var(--blue)}
+.note{font-size:16px;color:#444}
+.demo{background:#fff3cd;border:2px solid #e0b100;border-radius:12px;padding:10px;font-size:17px;margin-bottom:14px}
+.spin{text-align:center;padding:18px;color:#555}
+</style></head><body>
+<header><h1>✈ Sue's Flight Hub</h1><div id="sub">Pick your dates, then tap Search</div></header>
+<main>
+<div id="demo" class="demo" hidden><b>Sample prices only.</b> These are not real yet. The live service has not been connected.</div>
+<div class="box">
+  <label for="out">Flying out on</label><input type="date" id="out">
+  <label for="ret">Coming back on</label><input type="date" id="ret">
+  <button class="go" id="search">Search flights</button>
+  <p class="note" id="quota"></p>
+</div>
+<div class="tabs box" id="dtabs">
+  <button id="d1" class="on">Charlotte</button>
+  <button id="d2">Sydney</button>
+</div>
+<div class="tabs box">
+  <button id="t1" class="on">Economy</button>
+  <button id="t2">Premium Economy</button>
+</div>
+<div id="results"></div>
+<p class="note">Prices are for 1 adult, return, in pounds. Check the final price on the booking site before paying. “Avios” means you can earn Avios points on that airline, but how many depends on the fare type.</p>
+</main>
+<script>
+// ====== SETTINGS ======
+const WORKER_URL = "";   // e.g. "https://flight-prices.yourname.workers.dev" (blank = sample data)
+const ROUTES = [
+  {id:"lonclt", name:"London ⇄ Charlotte",    dest:"CLT", from:"LON", to:"CLT", fromName:"London"},
+  {id:"manclt", name:"Manchester ⇄ Charlotte", dest:"CLT", from:"MAN", to:"CLT", fromName:"Manchester"},
+  {id:"lonsyd", name:"London ⇄ Sydney",        dest:"SYD", from:"LON", to:"SYD", fromName:"London"}
+];
+// airline codes that earn Avios (BA, Iberia, Aer Lingus + partners)
+const AVIOS = new Set(["BA","IB","EI","LV","VY","AA","AS","QF","QR","AY","CX","JL","MH","RJ","AT","UL","S7"]);
+// =======================
+
+const $=id=>document.getElementById(id);
+let cls="1", dest="CLT", data={};   // data[routeId][cls] = results
+const iso=d=>d.toISOString().slice(0,10);
+const add=n=>{const d=new Date();d.setDate(d.getDate()+n);return iso(d)};
+$("out").min=$("ret").min=add(1);
+$("out").value=add(60); $("ret").value=add(74);
+$("out").onchange=()=>{ if($("ret").value<=$("out").value){const d=new Date($("out").value);d.setDate(d.getDate()+14);$("ret").value=iso(d)} };
+if(!WORKER_URL) $("demo").hidden=false;
+
+const hm=s=>s? s.slice(11,16):"";
+const day=s=>s? new Date(s.replace(" ","T")).toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"}):"";
+const dur=m=>Math.floor(m/60)+"h "+String(m%60).padStart(2,"0")+"m";
+const stopsTxt=f=>f.stops==0?"Direct":f.stops+" stop"+(f.stops>1?"s":"")+(f.via&&f.via.length?" ("+f.via.join(", ")+")":"");
+const gf=(r,out,ret,c)=>"https://www.google.com/travel/flights?q="+encodeURIComponent(
+  `Flights from ${r.from} to ${r.to} on ${out} through ${ret}${c=="2"?" premium economy":""}`)+"&curr=GBP&hl=en-GB";
+
+function sample(r,c){
+  const base={lonclt:420,manclt:480,lonsyd:1050}[r.id]*(c=="2"?2.1:1);
+  const A=[["British Airways","BA"],["American Airlines","AA"],["Virgin Atlantic","VS"],["Delta","DL"],["Aer Lingus","EI"],["United","UA"],["Lufthansa","LH"],["KLM","KL"]];
+  const SYD=[["Qantas","QF"],["Emirates","EK"],["Qatar Airways","QR"],["Singapore Airlines","SQ"],["Etihad","EY"],["Cathay Pacific","CX"],["Finnair","AY"],["Turkish Airlines","TK"]];
+  return (r.id=="lonsyd"?SYD:A).map((a,i)=>({price:Math.round(base*(1+i*.07)),duration:r.id=="lonsyd"?1380+i*40:600+i*45,
+    stops:r.id=="lonsyd"?1:i%2,via:r.id=="lonsyd"?["DOH"]:(i%2?["DFW"]:[]),airlines:[a[0]],codes:[a[1]],
+    dep:{time:$("out").value+" 0"+(6+i)+":30",airport:r.from},arr:{time:$("out").value+" 1"+(i)+":05",airport:r.to},cabin:c=="2"?"Premium Economy":"Economy",token:null}));
+}
+async function api(path){const r=await fetch(WORKER_URL+path);return r.json()}
+
+async function load(force){
+  const out=$("out").value, ret=$("ret").value;
+  if(force) data={};
+  const todo=ROUTES.filter(r=>r.dest==dest && !data[r.id]);
+  if(!todo.length){render();return}
+  $("results").innerHTML='<div class="box spin">Searching… this can take up to a minute.</div>';
+  for(const r of todo){ data[r.id]={};
+    for(const c of ["1","2"]){
+      try{
+        data[r.id][c]= WORKER_URL
+          ? (await api(`/search?from=${r.from}&to=${r.to}&out=${out}&ret=${ret}&cls=${c}`)).results||[]
+          : sample(r,c);
+      }catch(e){data[r.id][c]=[]}
+    }
+    render();
+  }
+  quota();
+}
+async function quota(){
+  if(!WORKER_URL) return;
+  try{const q=await api("/quota"); if(q.left!=null) $("quota").textContent=`Searches left this month: ${q.left} (each route uses 2)`}catch(e){}
+}
+
+function card(r,f,out,ret,c,idx){
+  const avios=f.codes.some(x=>AVIOS.has(x));
+  return `<div class="card">
+   <div class="price">£${f.price} <small>return, per person</small></div>
+   <div class="air">${f.airlines.join(" + ")}</div>
+   <span class="badge ${avios?"yes":"no"}">${avios?"✔ Earns Avios":"✘ No Avios"}</span>
+   <div class="leg"><b>Going out · ${day(f.dep.time)}</b><br>
+     <span class="t">${hm(f.dep.time)} ${f.dep.airport} → ${hm(f.arr.time)} ${f.arr.airport}</span><br>
+     ${stopsTxt(f)} · ${dur(f.duration)}</div>
+   <div class="leg" id="ret-${r.id}-${c}-${idx}"><b>Coming back · ${day(ret)}</b><br>
+     ${f.token&&WORKER_URL?`<button class="ret" onclick="showRet('${r.id}','${c}',${idx})">Show return flight times</button>`:
+     (WORKER_URL?'':'Sample return times not shown')}</div>
+   <a class="book" target="_blank" rel="noopener" href="${gf(r,out,ret,c)}">Book this flight</a>
+  </div>`;
+}
+function render(){
+  const out=$("out").value, ret=$("ret").value;
+  $("results").innerHTML=ROUTES.filter(r=>r.dest==dest&&data[r.id]).map(r=>{
+    const e=data[r.id]["1"]||[], p=data[r.id]["2"]||[];
+    const min=a=>a.length?"£"+Math.min(...a.map(x=>x.price)):"none found";
+    const list=(data[r.id][cls]||[]).slice().sort((a,b)=>a.price-b.price);
+    return `<div class="box"><h2>${r.name}</h2>
+      <p class="sum">Cheapest: Economy <b>${min(e)}</b> · Premium Economy <b>${min(p)}</b></p>
+      ${list.length?list.map((f,i)=>card(r,f,out,ret,cls,i)).join(""):
+      `<p>No flights found. <a href="${gf(r,out,ret,cls)}" target="_blank">Try on Google Flights</a></p>`}</div>`}).join("");
+}
+async function showRet(rid,c,idx){
+  const r=ROUTES.find(x=>x.id==rid);
+  const list=(data[rid][c]||[]).slice().sort((a,b)=>a.price-b.price), f=list[idx];
+  const el=$(`ret-${rid}-${c}-${idx}`);
+  el.innerHTML+='<div class="spin">Loading…</div>';
+  try{
+    const d=await api(`/search?from=${r.from}&to=${r.to}&out=${$("out").value}&ret=${$("ret").value}&cls=${c}&token=${encodeURIComponent(f.token)}`);
+    const g=(d.results||[])[0];
+    el.innerHTML=`<b>Coming back · ${day($("ret").value)}</b><br>`+(g?
+      `<span class="t">${hm(g.dep.time)} ${g.dep.airport} → ${hm(g.arr.time)} ${g.arr.airport}</span><br>${g.airlines.join(" + ")} · ${stopsTxt(g)} · ${dur(g.duration)}`:"Return times not available");
+  }catch(e){el.innerHTML+="<br>Could not load."}
+}
+$("search").onclick=()=>load(true);
+$("d1").onclick=()=>{dest="CLT";$("d1").className="on";$("d2").className="";load()};
+$("d2").onclick=()=>{dest="SYD";$("d2").className="on";$("d1").className="";load()};
+$("t1").onclick=()=>{cls="1";$("t1").className="on";$("t2").className="";render()};
+$("t2").onclick=()=>{cls="2";$("t2").className="on";$("t1").className="";render()};
+load();
+</script></body></html>
